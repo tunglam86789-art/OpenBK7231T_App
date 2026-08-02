@@ -356,7 +356,106 @@ extern "C" void DRV_IR_ISR(void* arg)
 	ir_counter++;
 }
 
+static int IR_HexNibble(char c) {
+	if (c >= '0' && c <= '9') return c - '0';
+	if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+	if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+	return -1;
+}
 
+// Send Tuya learned IR code.
+// Usage: IRSendTuyaRaw 061106111f023b...
+extern "C" commandResult_t IR_Send_TuyaRaw_Cmd(
+	const void *context,
+	const char *cmd,
+	const char *args_in,
+	int cmdFlags
+) {
+	if (!args_in || !args_in[0]) {
+		ADDLOG_ERROR(LOG_FEATURE_IR,
+			(char *)"IRSendTuyaRaw expects a Tuya hex code");
+		return CMD_RES_NOT_ENOUGH_ARGUMENTS;
+	}
+
+	if (!pIRsend) {
+		ADDLOG_ERROR(LOG_FEATURE_IR,
+			(char *)"IRSendTuyaRaw: IR sender is not running");
+		return CMD_RES_ERROR;
+	}
+
+	// Skip leading spaces.
+	while (*args_in == ' ' || *args_in == '\t') {
+		args_in++;
+	}
+
+	size_t hexLen = strlen(args_in);
+
+	// Each timing is stored by Tuya as four hex characters:
+	// low byte first, then high byte. Example 0611 => 0x1106 => 4358 us.
+	if (hexLen == 0 || (hexLen % 4) != 0) {
+		ADDLOG_ERROR(LOG_FEATURE_IR,
+			(char *)"IRSendTuyaRaw: invalid length %d, must be divisible by 4",
+			(int)hexLen);
+		return CMD_RES_BAD_ARGUMENT;
+	}
+
+	size_t timingCount = hexLen / 4;
+
+	// myIRsend has a 256-entry rolling queue, with one entry reserved.
+	if (timingCount > ((SEND_MAXBITS * 2) - 1)) {
+		ADDLOG_ERROR(LOG_FEATURE_IR,
+			(char *)"IRSendTuyaRaw: too many timings %d, maximum %d",
+			(int)timingCount,
+			(int)((SEND_MAXBITS * 2) - 1));
+		return CMD_RES_BAD_ARGUMENT;
+	}
+
+	pIRsend->resetsendqueue();
+	pIRsend->enableIROut(38000, 33);
+
+	for (size_t i = 0; i < timingCount; i++) {
+		const char *s = args_in + (i * 4);
+
+		int h0 = IR_HexNibble(s[0]);
+		int h1 = IR_HexNibble(s[1]);
+		int h2 = IR_HexNibble(s[2]);
+		int h3 = IR_HexNibble(s[3]);
+
+		if (h0 < 0 || h1 < 0 || h2 < 0 || h3 < 0) {
+			pIRsend->resetsendqueue();
+			ADDLOG_ERROR(LOG_FEATURE_IR,
+				(char *)"IRSendTuyaRaw: invalid hex at position %d",
+				(int)(i * 4));
+			return CMD_RES_BAD_ARGUMENT;
+		}
+
+		uint16_t lowByte  = (uint16_t)((h0 << 4) | h1);
+		uint16_t highByte = (uint16_t)((h2 << 4) | h3);
+		uint16_t usec = (uint16_t)(lowByte | (highByte << 8));
+
+		if (usec == 0) {
+			pIRsend->resetsendqueue();
+			ADDLOG_ERROR(LOG_FEATURE_IR,
+				(char *)"IRSendTuyaRaw: zero timing at index %d",
+				(int)i);
+			return CMD_RES_BAD_ARGUMENT;
+		}
+
+		// Tuya sequence begins with a MARK, then alternates MARK/SPACE.
+		if ((i & 1) == 0) {
+			pIRsend->mark(usec);
+		}
+		else {
+			pIRsend->space(usec);
+		}
+	}
+
+	ADDLOG_INFO(LOG_FEATURE_IR,
+		(char *)"IRSendTuyaRaw queued %d timings at 38kHz",
+		(int)timingCount);
+
+	return CMD_RES_OK;
+}
 extern "C" commandResult_t IR_Send_Cmd(const void *context, const char *cmd, const char *args_in, int cmdFlags) {
 	if (!args_in) return CMD_RES_NOT_ENOUGH_ARGUMENTS;
 	char args[128];
@@ -707,6 +806,7 @@ extern "C" void DRV_IR_Init() {
 			//cmddetail:"fn":"IR_Send_Cmd","file":"driver/drv_ir_new.cpp","requires":"ENABLE_DRIVER_IRREMOTEESP (IRremoteESP8266)",
 			//cmddetail:"examples":""}
 			CMD_RegisterCommand("IRSend", IR_Send_Cmd, NULL);
+CMD_RegisterCommand("IRSendTuyaRaw", IR_Send_TuyaRaw_Cmd, NULL);
 			//cmddetail:{"name":"IRAC","args":"[TODO]",
 			//cmddetail:"descr":"Sends IR commands for HVAC control (TODO)",
 			//cmddetail:"fn":"IR_AC_Cmd","file":"driver/drv_ir_new.cpp","requires":"ENABLE_DRIVER_IRREMOTEESP (IRremoteESP8266)",
