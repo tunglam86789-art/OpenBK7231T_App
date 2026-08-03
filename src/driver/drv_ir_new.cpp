@@ -479,17 +479,7 @@ extern "C" commandResult_t IR_Replay_Last_Cmd(
 		return CMD_RES_ERROR;
 	}
 
-	pIRsend->resetsendqueue();
-	pIRsend->enableIROut(38000, 33);
-
-	for (uint16_t i = 0; i < gLastRawLen; i++) {
-		if ((i & 1) == 0) {
-			pIRsend->mark(gLastRaw[i]);
-		}
-		else {
-			pIRsend->space(gLastRaw[i]);
-		}
-	}
+	pIRsend->sendRaw(gLastRaw, gLastRawLen, 38);
 
 	ADDLOG_INFO(LOG_FEATURE_IR,
 		(char *)"IRReplayLast queued %d raw timings",
