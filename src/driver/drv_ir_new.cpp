@@ -984,8 +984,40 @@ extern "C" void DRV_IR_RunFrame() {
 					ADDLOG_DEBUG(LOG_FEATURE_IR, (char *)"IR fire event took %dms", counter_dur);
 				}
 			} else {
-				ADDLOG_INFO(LOG_FEATURE_IR, "Received Unknown IR ");
-			}
+    String tuyaRaw = "";
+
+    // rawbuf[0] là khoảng nghỉ trước tín hiệu, bỏ qua.
+    // Các phần tử còn lại tính theo tick 2 micro giây.
+    for (uint16_t i = 1; i < results.rawlen; i++) {
+        uint32_t usec = (uint32_t)results.rawbuf[i] * kRawTick;
+
+        // IRSendTuyaRaw dùng mỗi timing là uint16 little-endian,
+        // biểu diễn thành 4 ký tự HEX: byte thấp trước, byte cao sau.
+        if (usec > 0xFFFF) {
+            usec = 0xFFFF;
+        }
+
+        uint8_t lowByte = usec & 0xFF;
+        uint8_t highByte = (usec >> 8) & 0xFF;
+
+        char timingHex[5];
+        snprintf(
+            timingHex,
+            sizeof(timingHex),
+            "%02x%02x",
+            lowByte,
+            highByte
+        );
+
+        tuyaRaw += timingHex;
+    }
+
+    ADDLOG_INFO(
+        LOG_FEATURE_IR,
+        (char *)"IRSendTuyaRaw %s",
+        tuyaRaw.c_str()
+    );
+}
 			/*
 			* !!!Important!!! Enable receiving of the next value,
 			* since receiving has stopped after the end of the current received data packet.
