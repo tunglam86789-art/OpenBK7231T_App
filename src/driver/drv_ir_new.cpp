@@ -282,7 +282,7 @@ public:
 myIRsend *pIRsend = NULL;
 IRrecv *ourReceiver = NULL;
 
-#define IR_LAST_RAW_MAX 255
+#define IR_LAST_RAW_MAX 600
 
 static uint16_t gLastRaw[IR_LAST_RAW_MAX];
 static uint16_t gLastRawLen = 0;
