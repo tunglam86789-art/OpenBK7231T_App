@@ -282,6 +282,11 @@ public:
 myIRsend *pIRsend = NULL;
 IRrecv *ourReceiver = NULL;
 
+#define IR_LAST_RAW_MAX 255
+
+static uint16_t gLastRaw[IR_LAST_RAW_MAX];
+static uint16_t gLastRawLen = 0;
+
 // this is our ISR.
 // it is called every 50us, so we need to work on making it as efficient as possible.
 extern "C" void DRV_IR_ISR(void* arg)
@@ -453,6 +458,42 @@ extern "C" commandResult_t IR_Send_TuyaRaw_Cmd(
 	ADDLOG_INFO(LOG_FEATURE_IR,
 		(char *)"IRSendTuyaRaw queued %d timings at 38kHz",
 		(int)timingCount);
+
+	return CMD_RES_OK;
+}
+extern "C" commandResult_t IR_Replay_Last_Cmd(
+	const void *context,
+	const char *cmd,
+	const char *args_in,
+	int cmdFlags
+) {
+	if (!pIRsend) {
+		ADDLOG_ERROR(LOG_FEATURE_IR,
+			(char *)"IRReplayLast: IR sender is not running");
+		return CMD_RES_ERROR;
+	}
+
+	if (gLastRawLen == 0) {
+		ADDLOG_ERROR(LOG_FEATURE_IR,
+			(char *)"IRReplayLast: no captured IR data");
+		return CMD_RES_ERROR;
+	}
+
+	pIRsend->resetsendqueue();
+	pIRsend->enableIROut(38000, 33);
+
+	for (uint16_t i = 0; i < gLastRawLen; i++) {
+		if ((i & 1) == 0) {
+			pIRsend->mark(gLastRaw[i]);
+		}
+		else {
+			pIRsend->space(gLastRaw[i]);
+		}
+	}
+
+	ADDLOG_INFO(LOG_FEATURE_IR,
+		(char *)"IRReplayLast queued %d raw timings",
+		(int)gLastRawLen);
 
 	return CMD_RES_OK;
 }
@@ -806,7 +847,8 @@ extern "C" void DRV_IR_Init() {
 			//cmddetail:"fn":"IR_Send_Cmd","file":"driver/drv_ir_new.cpp","requires":"ENABLE_DRIVER_IRREMOTEESP (IRremoteESP8266)",
 			//cmddetail:"examples":""}
 			CMD_RegisterCommand("IRSend", IR_Send_Cmd, NULL);
-CMD_RegisterCommand("IRSendTuyaRaw", IR_Send_TuyaRaw_Cmd, NULL);
+            CMD_RegisterCommand("IRSendTuyaRaw", IR_Send_TuyaRaw_Cmd, NULL);
+			CMD_RegisterCommand("IRReplayLast", IR_Replay_Last_Cmd, NULL);
 			//cmddetail:{"name":"IRAC","args":"[TODO]",
 			//cmddetail:"descr":"Sends IR commands for HVAC control (TODO)",
 			//cmddetail:"fn":"IR_AC_Cmd","file":"driver/drv_ir_new.cpp","requires":"ENABLE_DRIVER_IRREMOTEESP (IRremoteESP8266)",
@@ -984,39 +1026,28 @@ extern "C" void DRV_IR_RunFrame() {
 					ADDLOG_DEBUG(LOG_FEATURE_IR, (char *)"IR fire event took %dms", counter_dur);
 				}
 			} else {
-    String tuyaRaw = "";
+	gLastRawLen = 0;
 
-    // rawbuf[0] là khoảng nghỉ trước tín hiệu, bỏ qua.
-    // Các phần tử còn lại tính theo tick 2 micro giây.
-    for (uint16_t i = 1; i < results.rawlen; i++) {
-        uint32_t usec = (uint32_t)results.rawbuf[i] * kRawTick;
+	// rawbuf[0] là khoảng nghỉ trước tín hiệu, bỏ qua.
+	for (uint16_t i = 1;
+		i < results.rawlen && gLastRawLen < IR_LAST_RAW_MAX;
+		i++) {
 
-        // IRSendTuyaRaw dùng mỗi timing là uint16 little-endian,
-        // biểu diễn thành 4 ký tự HEX: byte thấp trước, byte cao sau.
-        if (usec > 0xFFFF) {
-            usec = 0xFFFF;
-        }
+		uint32_t usec =
+			(uint32_t)results.rawbuf[i] * kRawTick;
 
-        uint8_t lowByte = usec & 0xFF;
-        uint8_t highByte = (usec >> 8) & 0xFF;
+		if (usec > 0xFFFF) {
+			usec = 0xFFFF;
+		}
 
-        char timingHex[5];
-        snprintf(
-            timingHex,
-            sizeof(timingHex),
-            "%02x%02x",
-            lowByte,
-            highByte
-        );
+		gLastRaw[gLastRawLen++] = (uint16_t)usec;
+	}
 
-        tuyaRaw += timingHex;
-    }
-
-    ADDLOG_INFO(
-        LOG_FEATURE_IR,
-        (char *)"IRSendTuyaRaw %s",
-        tuyaRaw.c_str()
-    );
+	ADDLOG_INFO(
+		LOG_FEATURE_IR,
+		(char *)"Captured raw IR: %d timings. Run IRReplayLast",
+		(int)gLastRawLen
+	);
 }
 			/*
 			* !!!Important!!! Enable receiving of the next value,
