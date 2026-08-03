@@ -478,7 +478,7 @@ extern "C" commandResult_t IR_Replay_Last_Cmd(
 			(char *)"IRReplayLast: no captured IR data");
 		return CMD_RES_ERROR;
 	}
-
+	
 	pIRsend->sendRaw(gLastRaw, gLastRawLen, 38);
 
 	ADDLOG_INFO(LOG_FEATURE_IR,
