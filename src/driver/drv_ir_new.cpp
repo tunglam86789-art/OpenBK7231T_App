@@ -3,7 +3,6 @@
 
 #if ENABLE_DRIVER_IRREMOTEESP
 // drv_ir_new.cpp - IRremoteESP8266
-#include <IRutils.h>
 extern "C" {
 	// these cause error: conflicting declaration of 'int bk_wlan_mcu_suppress_and_sleep(unsigned int)' with 'C' linkage
 #include "../new_common.h"
