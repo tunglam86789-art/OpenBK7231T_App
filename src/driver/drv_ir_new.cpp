@@ -530,6 +530,10 @@ extern "C" commandResult_t IR_Send_Cmd(const void *context, const char *cmd, con
 						if( pIRsend->send(protocol,data,bits,repeats) )
 						{
 							pIRsend->delay(100);
+							if (ourReceiver) {
+    ourReceiver->enableIRIn();
+    ourReceiver->resume();
+}
 							ADDLOG_INFO(LOG_FEATURE_IR, (char *)"IR send %s: protocol %d bits %d data 0x%llX repeats %d", args, (int)protocol, (int)bits, (long long int)data, (int)repeats);
 							return CMD_RES_OK;
 						} else {
