@@ -530,10 +530,7 @@ extern "C" commandResult_t IR_Send_Cmd(const void *context, const char *cmd, con
 						if( pIRsend->send(protocol,data,bits,repeats) )
 						{
 							pIRsend->delay(100);
-							if (ourReceiver) {
-    ourReceiver->enableIRIn();
-    ourReceiver->resume();
-}
+						
 							ADDLOG_INFO(LOG_FEATURE_IR, (char *)"IR send %s: protocol %d bits %d data 0x%llX repeats %d", args, (int)protocol, (int)bits, (long long int)data, (int)repeats);
 							return CMD_RES_OK;
 						} else {
@@ -1016,40 +1013,38 @@ extern "C" void DRV_IR_RunFrame() {
 					uint32_t counter_dur = ((ir_counter - counter_in) * 50) / 1000;
 					ADDLOG_DEBUG(LOG_FEATURE_IR, (char *)"IR fire event took %dms", counter_dur);
 				}
-			else {
-    if (gLastRaw) {
-        delete[] gLastRaw;
-        gLastRaw = NULL;
-    }
+	            } else {
+                ADDLOG_INFO(LOG_FEATURE_IR, "Received Unknown IR ");
+            }
 
-    gLastRawLen = getCorrectedRawLength(&results);
-    gLastRaw = resultToRawArray(&results);
+            // Save a copy before resume() clears the receiver buffer.
+            if (gLastRaw) {
+                delete[] gLastRaw;
+                gLastRaw = NULL;
+            }
 
-    if (!gLastRaw || gLastRawLen == 0) {
-        gLastRawLen = 0;
-        ADDLOG_ERROR(
-            LOG_FEATURE_IR,
-            (char *)"IR capture conversion failed"
-        );
-    }
-    else {
-        ADDLOG_INFO(
-            LOG_FEATURE_IR,
-            (char *)"Captured corrected raw IR: %d timings",
-            (int)gLastRawLen
-        );
+            gLastRawLen = getCorrectedRawLength(&results);
+            gLastRaw = resultToRawArray(&results);
+
+            if (!gLastRaw || gLastRawLen == 0) {
+                gLastRawLen = 0;
+                ADDLOG_ERROR(
+                    LOG_FEATURE_IR,
+                    (char *)"IR capture conversion failed"
+                );
+            } else {
+                ADDLOG_INFO(
+                    LOG_FEATURE_IR,
+                    (char *)"Captured corrected raw IR: %d timings",
+                    (int)gLastRawLen
+                );
+            }
+
+            // Required after every successful decode().
+            ourReceiver->resume();
+        }
     }
 }
-			/*
-			* !!!Important!!! Enable receiving of the next value,
-			* since receiving has stopped after the end of the current received data packet.
-			*/
-			ourReceiver->resume(); // Enable receiving of the next value
-		}
-	}
-}
-}
-
 #ifdef TEST_CPP
 // routines to test C++
 class cpptest2 {
