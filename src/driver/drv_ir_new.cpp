@@ -282,9 +282,7 @@ public:
 myIRsend *pIRsend = NULL;
 IRrecv *ourReceiver = NULL;
 
-#define IR_LAST_RAW_MAX 600
-
-static uint16_t gLastRaw[IR_LAST_RAW_MAX];
+static uint16_t *gLastRaw = NULL;
 static uint16_t gLastRawLen = 0;
 
 // this is our ISR.
@@ -473,7 +471,7 @@ extern "C" commandResult_t IR_Replay_Last_Cmd(
 		return CMD_RES_ERROR;
 	}
 
-	if (gLastRawLen == 0) {
+	if (!gLastRaw || gLastRawLen == 0) {
 		ADDLOG_ERROR(LOG_FEATURE_IR,
 			(char *)"IRReplayLast: no captured IR data");
 		return CMD_RES_ERROR;
@@ -1015,29 +1013,29 @@ extern "C" void DRV_IR_RunFrame() {
 					uint32_t counter_dur = ((ir_counter - counter_in) * 50) / 1000;
 					ADDLOG_DEBUG(LOG_FEATURE_IR, (char *)"IR fire event took %dms", counter_dur);
 				}
-			} else {
-	gLastRawLen = 0;
+			else {
+    if (gLastRaw) {
+        delete[] gLastRaw;
+        gLastRaw = NULL;
+    }
 
-	// rawbuf[0] là khoảng nghỉ trước tín hiệu, bỏ qua.
-	for (uint16_t i = 1;
-		i < results.rawlen && gLastRawLen < IR_LAST_RAW_MAX;
-		i++) {
+    gLastRawLen = getCorrectedRawLength(&results);
+    gLastRaw = resultToRawArray(&results);
 
-		uint32_t usec =
-			(uint32_t)results.rawbuf[i] * kRawTick;
-
-		if (usec > 0xFFFF) {
-			usec = 0xFFFF;
-		}
-
-		gLastRaw[gLastRawLen++] = (uint16_t)usec;
-	}
-
-	ADDLOG_INFO(
-		LOG_FEATURE_IR,
-		(char *)"Captured raw IR: %d timings. Run IRReplayLast",
-		(int)gLastRawLen
-	);
+    if (!gLastRaw || gLastRawLen == 0) {
+        gLastRawLen = 0;
+        ADDLOG_ERROR(
+            LOG_FEATURE_IR,
+            (char *)"IR capture conversion failed"
+        );
+    }
+    else {
+        ADDLOG_INFO(
+            LOG_FEATURE_IR,
+            (char *)"Captured corrected raw IR: %d timings",
+            (int)gLastRawLen
+        );
+    }
 }
 			/*
 			* !!!Important!!! Enable receiving of the next value,
