@@ -1044,7 +1044,7 @@ extern "C" void DRV_IR_RunFrame() {
 		}
 	}
 }
-
+}
 
 #ifdef TEST_CPP
 // routines to test C++
