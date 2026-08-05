@@ -276,7 +276,6 @@ public:
 	float our_us;
 };
 
-
 // our send/receive instances
 myIRsend *pIRsend = NULL;
 IRrecv *ourReceiver = NULL;
@@ -284,57 +283,6 @@ IRrecv *ourReceiver = NULL;
 static uint16_t *gLastRaw = NULL;
 static uint16_t gLastRawLen = 0;
 static bool gIRTxWasBusy = false;
-static bool gLoggedGoodRaw = false;
-static bool gLoggedBadRaw = false;
-
-static void IR_LogRawCompare(
-    const char *tag,
-    const uint16_t *raw,
-    uint16_t len
-) {
-    ADDLOG_INFO(
-        LOG_FEATURE_IR,
-        (char *)"IR RAW %s BEGIN len=%d",
-        tag,
-        (int)len
-    );
-
-    char line[128];
-
-    for (uint16_t i = 0; i < len; i += 10) {
-        int pos = snprintf(
-            line,
-            sizeof(line),
-            "%s %03d:",
-            tag,
-            (int)i
-        );
-
-        for (uint16_t j = i; j < len && j < i + 10; j++) {
-            if (pos >= (int)sizeof(line) - 8) {
-                break;
-            }
-
-            pos += snprintf(
-                line + pos,
-                sizeof(line) - pos,
-                " %u",
-                (unsigned int)raw[j]
-            );
-        }
-
-        ADDLOG_INFO(
-            LOG_FEATURE_IR,
-            (char *)"%s",
-            line
-        );
-    }
-    ADDLOG_INFO(
-        LOG_FEATURE_IR,
-        (char *)"IR RAW %s END",
-        tag
-    );
-}
 static bool IR_ValueInRange(
     const uint32_t value,
     const uint32_t minimum,
@@ -350,49 +298,73 @@ static uint32_t IR_GetRawUsecs(
     return (uint32_t)results->rawbuf[index] * kRawTick;
 }
 
+/*
+ * Giải mã một khung COOLIX hoàn chỉnh bắt đầu tại "start".
+ *
+ * Cấu trúc:
+ *   Header mark + header space
+ *   48 bit: 3 byte dữ liệu xen kẽ 3 byte đảo
+ *   Footer mark
+ *
+ * Không phụ thuộc rawlen phải là 100 hay 200.
+ */
 static bool IR_DecodeCoolixFallbackFrame(
     const decode_results *results,
     const uint16_t start,
-    const bool requireGap,
     uint32_t *code
 ) {
-    if (!results || !code) {
+    if (!results || !results->rawbuf || !code) {
         return false;
     }
 
-    // Header: MARK + SPACE.
-    const uint32_t headerMark = IR_GetRawUsecs(results, start);
-    const uint32_t headerSpace = IR_GetRawUsecs(results, start + 1);
+    // Cần đủ: 2 header + 96 data timings + 1 footer = 99 phần tử.
+    if ((uint32_t)start + 98u >= results->rawlen) {
+        return false;
+    }
 
-    if (!IR_ValueInRange(headerMark, 3500, 5200) ||
-        !IR_ValueInRange(headerSpace, 3500, 5200)) {
+    const uint32_t headerMark =
+        IR_GetRawUsecs(results, start);
+
+    const uint32_t headerSpace =
+        IR_GetRawUsecs(results, start + 1);
+
+    // Header thực tế đo được quanh 4.2 ms.
+    if (!IR_ValueInRange(headerMark, 3000, 5600) ||
+        !IR_ValueInRange(headerSpace, 3000, 5600)) {
         return false;
     }
 
     uint8_t bytes[6] = {0};
 
-    // COOLIX 24-bit truyền 48 bit:
-    // byte thật, byte đảo, lặp lại cho đủ 3 byte dữ liệu.
     for (uint16_t bit = 0; bit < 48; bit++) {
-        const uint16_t markIndex = start + 2 + bit * 2;
-        const uint16_t spaceIndex = markIndex + 1;
+        const uint16_t markIndex =
+            start + 2 + bit * 2;
 
-        const uint32_t mark = IR_GetRawUsecs(results, markIndex);
-        const uint32_t space = IR_GetRawUsecs(results, spaceIndex);
+        const uint16_t spaceIndex =
+            markIndex + 1;
 
-        // Các MARK thực tế đã đo: khoảng 336–576 us.
-        if (!IR_ValueInRange(mark, 250, 800)) {
+        const uint32_t mark =
+            IR_GetRawUsecs(results, markIndex);
+
+        const uint32_t space =
+            IR_GetRawUsecs(results, spaceIndex);
+
+        /*
+         * MARK thực tế của cả mẫu GOOD và BAD nằm trong nhóm ngắn.
+         * Giới hạn rộng để chịu được xung co xuống khoảng 336 us.
+         */
+        if (!IR_ValueInRange(mark, 200, 900)) {
             return false;
         }
 
         uint8_t decodedBit;
 
-        // SPACE bit 0 thực tế: khoảng 336–528 us.
-        if (IR_ValueInRange(space, 250, 800)) {
+        // SPACE bit 0: nhóm ngắn.
+        if (IR_ValueInRange(space, 200, 900)) {
             decodedBit = 0;
         }
-        // SPACE bit 1 thực tế: khoảng 1200–1584 us.
-        else if (IR_ValueInRange(space, 1000, 1900)) {
+        // SPACE bit 1: nhóm dài.
+        else if (IR_ValueInRange(space, 950, 2200)) {
             decodedBit = 1;
         }
         else {
@@ -400,29 +372,23 @@ static bool IR_DecodeCoolixFallbackFrame(
         }
 
         const uint16_t byteIndex = bit / 8;
+
         bytes[byteIndex] =
             (uint8_t)((bytes[byteIndex] << 1) | decodedBit);
     }
 
-    // Footer MARK.
     const uint32_t footerMark =
         IR_GetRawUsecs(results, start + 98);
 
-    if (!IR_ValueInRange(footerMark, 250, 800)) {
+    if (!IR_ValueInRange(footerMark, 200, 900)) {
         return false;
     }
 
-    // Khung đầu phải có khoảng nghỉ trước khung lặp.
-    if (requireGap) {
-        const uint32_t gap =
-            IR_GetRawUsecs(results, start + 99);
-
-        if (gap < 3500) {
-            return false;
-        }
-    }
-
-    // Kiểm tra từng byte đảo để không nhận nhầm nhiễu.
+    /*
+     * COOLIX gửi:
+     * byte0, ~byte0, byte1, ~byte1, byte2, ~byte2.
+     * Đây là kiểm tra bắt buộc để không biến nhiễu thành COOLIX.
+     */
     if (bytes[1] != (uint8_t)(bytes[0] ^ 0xFFu) ||
         bytes[3] != (uint8_t)(bytes[2] ^ 0xFFu) ||
         bytes[5] != (uint8_t)(bytes[4] ^ 0xFFu)) {
@@ -437,47 +403,107 @@ static bool IR_DecodeCoolixFallbackFrame(
     return true;
 }
 
+/*
+ * Quét toàn bộ buffer:
+ * - rawlen khoảng 100: một khung.
+ * - rawlen khoảng 200: hai khung.
+ * - rawlen 1024/overflow: nhiều khung bị gom chung.
+ *
+ * Nếu có nhiều mã hợp lệ, chọn mã xuất hiện nhiều nhất.
+ * Nếu hai mã khác nhau hòa số lần xuất hiện thì từ chối để tránh nhận sai.
+ */
 static bool IR_TryDecodeCoolixFallback(
     decode_results *results
 ) {
     if (!results ||
+        !results->rawbuf ||
         results->decode_type != decode_type_t::UNKNOWN ||
-        results->overflow ||
-        results->rawlen != 200) {
+        results->rawlen < 99) {
         return false;
     }
 
-    uint32_t firstCode = 0;
-    uint32_t secondCode = 0;
+    static const uint8_t kMaxCandidates = 8;
 
-    // rawbuf[0] là khoảng nghỉ trước tín hiệu.
-    // Khung thứ nhất bắt đầu tại 1, khung lặp bắt đầu tại 101.
-    if (!IR_DecodeCoolixFallbackFrame(
-            results, 1, true, &firstCode)) {
+    uint32_t candidateCodes[kMaxCandidates] = {0};
+    uint16_t candidateCounts[kMaxCandidates] = {0};
+    uint8_t candidateUsed = 0;
+
+    for (uint16_t start = 0;
+         (uint32_t)start + 98u < results->rawlen;
+         start++) {
+
+        uint32_t decodedCode = 0;
+
+        if (!IR_DecodeCoolixFallbackFrame(
+                results,
+                start,
+                &decodedCode)) {
+            continue;
+        }
+
+        int candidateIndex = -1;
+
+        for (uint8_t i = 0; i < candidateUsed; i++) {
+            if (candidateCodes[i] == decodedCode) {
+                candidateIndex = i;
+                break;
+            }
+        }
+
+        if (candidateIndex >= 0) {
+            candidateCounts[candidateIndex]++;
+        }
+        else {
+            if (candidateUsed >= kMaxCandidates) {
+                // Quá nhiều mã khác nhau trong cùng buffer: coi là nhiễu.
+                return false;
+            }
+
+            candidateCodes[candidateUsed] = decodedCode;
+            candidateCounts[candidateUsed] = 1;
+            candidateUsed++;
+        }
+
+        /*
+         * Đã xác nhận một khung 99 timing.
+         * Nhảy gần hết khung để tránh quét lại từng vị trí bên trong nó.
+         */
+        start += 97;
+    }
+
+    if (candidateUsed == 0) {
         return false;
     }
 
-    if (!IR_DecodeCoolixFallbackFrame(
-            results, 101, false, &secondCode)) {
-        return false;
+    uint32_t bestCode = candidateCodes[0];
+    uint16_t bestCount = candidateCounts[0];
+    bool ambiguous = false;
+
+    for (uint8_t i = 1; i < candidateUsed; i++) {
+        if (candidateCounts[i] > bestCount) {
+            bestCode = candidateCodes[i];
+            bestCount = candidateCounts[i];
+            ambiguous = false;
+        }
+        else if (candidateCounts[i] == bestCount &&
+                 candidateCodes[i] != bestCode) {
+            ambiguous = true;
+        }
     }
 
-    // Cả hai khung lặp bắt buộc phải giống nhau.
-    if (firstCode != secondCode) {
+    if (ambiguous) {
         return false;
     }
 
     results->decode_type = decode_type_t::COOLIX;
     results->bits = 24;
-    results->value = firstCode;
+    results->value = bestCode;
     results->address = 0;
     results->command = 0;
     results->repeat = false;
 
     return true;
 }
-
-
 // this is our ISR.
 // it is called every 50us, so we need to work on making it as efficient as possible.
 extern "C" void DRV_IR_ISR(void* arg)
@@ -1297,16 +1323,22 @@ ADDLOG_INFO(
 
 // Buffer thu đã đầy: bỏ khung lỗi, không chuyển thành RAW.
 if (results.overflow) {
-    ADDLOG_INFO(
-        LOG_FEATURE_IR,
-        (char *)"IR RX OVERFLOW: rawlen=%d - discarded",
-        (int)results.rawlen
-    );
+    if (results.decode_type == decode_type_t::COOLIX) {
+        ADDLOG_INFO(
+            LOG_FEATURE_IR,
+            (char *)"IR RX overflow: COOLIX recovered, RAW not saved"
+        );
+    }
+    else {
+        ADDLOG_INFO(
+            LOG_FEATURE_IR,
+            (char *)"IR RX overflow: no valid COOLIX, RAW discarded"
+        );
+    }
 
     ourReceiver->resume();
     return;
 }
-
 // Xóa RAW cũ.
 if (gLastRaw) {
     delete[] gLastRaw;
@@ -1332,22 +1364,7 @@ else {
         (char *)"Captured corrected raw IR: %d timings",
         (int)gLastRawLen
     );
-	    if (
-        results.decode_type == decode_type_t::COOLIX &&
-        !gLoggedGoodRaw
-    ) {
-        gLoggedGoodRaw = true;
-        IR_LogRawCompare("GOOD", gLastRaw, gLastRawLen);
-    }
-    else if (
-        results.decode_type == decode_type_t::UNKNOWN &&
-        !gLoggedBadRaw
-    ) {
-        gLoggedBadRaw = true;
-        IR_LogRawCompare("BAD", gLastRaw, gLastRawLen);
-    }
 }
-
 ourReceiver->resume();
         }
     }
