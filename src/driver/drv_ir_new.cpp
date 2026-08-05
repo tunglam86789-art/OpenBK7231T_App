@@ -329,13 +329,154 @@ static void IR_LogRawCompare(
             line
         );
     }
-
     ADDLOG_INFO(
         LOG_FEATURE_IR,
         (char *)"IR RAW %s END",
         tag
     );
 }
+static bool IR_ValueInRange(
+    const uint32_t value,
+    const uint32_t minimum,
+    const uint32_t maximum
+) {
+    return value >= minimum && value <= maximum;
+}
+
+static uint32_t IR_GetRawUsecs(
+    const decode_results *results,
+    const uint16_t index
+) {
+    return (uint32_t)results->rawbuf[index] * kRawTick;
+}
+
+static bool IR_DecodeCoolixFallbackFrame(
+    const decode_results *results,
+    const uint16_t start,
+    const bool requireGap,
+    uint32_t *code
+) {
+    if (!results || !code) {
+        return false;
+    }
+
+    // Header: MARK + SPACE.
+    const uint32_t headerMark = IR_GetRawUsecs(results, start);
+    const uint32_t headerSpace = IR_GetRawUsecs(results, start + 1);
+
+    if (!IR_ValueInRange(headerMark, 3500, 5200) ||
+        !IR_ValueInRange(headerSpace, 3500, 5200)) {
+        return false;
+    }
+
+    uint8_t bytes[6] = {0};
+
+    // COOLIX 24-bit truyền 48 bit:
+    // byte thật, byte đảo, lặp lại cho đủ 3 byte dữ liệu.
+    for (uint16_t bit = 0; bit < 48; bit++) {
+        const uint16_t markIndex = start + 2 + bit * 2;
+        const uint16_t spaceIndex = markIndex + 1;
+
+        const uint32_t mark = IR_GetRawUsecs(results, markIndex);
+        const uint32_t space = IR_GetRawUsecs(results, spaceIndex);
+
+        // Các MARK thực tế đã đo: khoảng 336–576 us.
+        if (!IR_ValueInRange(mark, 250, 800)) {
+            return false;
+        }
+
+        uint8_t decodedBit;
+
+        // SPACE bit 0 thực tế: khoảng 336–528 us.
+        if (IR_ValueInRange(space, 250, 800)) {
+            decodedBit = 0;
+        }
+        // SPACE bit 1 thực tế: khoảng 1200–1584 us.
+        else if (IR_ValueInRange(space, 1000, 1900)) {
+            decodedBit = 1;
+        }
+        else {
+            return false;
+        }
+
+        const uint16_t byteIndex = bit / 8;
+        bytes[byteIndex] =
+            (uint8_t)((bytes[byteIndex] << 1) | decodedBit);
+    }
+
+    // Footer MARK.
+    const uint32_t footerMark =
+        IR_GetRawUsecs(results, start + 98);
+
+    if (!IR_ValueInRange(footerMark, 250, 800)) {
+        return false;
+    }
+
+    // Khung đầu phải có khoảng nghỉ trước khung lặp.
+    if (requireGap) {
+        const uint32_t gap =
+            IR_GetRawUsecs(results, start + 99);
+
+        if (gap < 3500) {
+            return false;
+        }
+    }
+
+    // Kiểm tra từng byte đảo để không nhận nhầm nhiễu.
+    if (bytes[1] != (uint8_t)(bytes[0] ^ 0xFFu) ||
+        bytes[3] != (uint8_t)(bytes[2] ^ 0xFFu) ||
+        bytes[5] != (uint8_t)(bytes[4] ^ 0xFFu)) {
+        return false;
+    }
+
+    *code =
+        ((uint32_t)bytes[0] << 16) |
+        ((uint32_t)bytes[2] << 8) |
+        (uint32_t)bytes[4];
+
+    return true;
+}
+
+static bool IR_TryDecodeCoolixFallback(
+    decode_results *results
+) {
+    if (!results ||
+        results->decode_type != decode_type_t::UNKNOWN ||
+        results->overflow ||
+        results->rawlen != 200) {
+        return false;
+    }
+
+    uint32_t firstCode = 0;
+    uint32_t secondCode = 0;
+
+    // rawbuf[0] là khoảng nghỉ trước tín hiệu.
+    // Khung thứ nhất bắt đầu tại 1, khung lặp bắt đầu tại 101.
+    if (!IR_DecodeCoolixFallbackFrame(
+            results, 1, true, &firstCode)) {
+        return false;
+    }
+
+    if (!IR_DecodeCoolixFallbackFrame(
+            results, 101, false, &secondCode)) {
+        return false;
+    }
+
+    // Cả hai khung lặp bắt buộc phải giống nhau.
+    if (firstCode != secondCode) {
+        return false;
+    }
+
+    results->decode_type = decode_type_t::COOLIX;
+    results->bits = 24;
+    results->value = firstCode;
+    results->address = 0;
+    results->command = 0;
+    results->repeat = false;
+
+    return true;
+}
+
 
 // this is our ISR.
 // it is called every 50us, so we need to work on making it as efficient as possible.
@@ -1027,6 +1168,13 @@ extern "C" void DRV_IR_RunFrame() {
 	if (ourReceiver) {
 		decode_results results;
 		if (ourReceiver->decode(&results)) {
+			if (IR_TryDecodeCoolixFallback(&results)) {
+    ADDLOG_INFO(
+        LOG_FEATURE_IR,
+        (char *)"IR COOLIX fallback recovered: 0x%06lX",
+        (unsigned long)results.value
+    );
+}
 			// TODO: find a better way?
 			String proto_name = typeToString(results.decode_type, results.repeat).c_str();
 
