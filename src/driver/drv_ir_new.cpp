@@ -459,30 +459,69 @@ extern "C" commandResult_t IR_Send_TuyaRaw_Cmd(
 	return CMD_RES_OK;
 }
 extern "C" commandResult_t IR_Replay_Last_Cmd(
-	const void *context,
-	const char *cmd,
-	const char *args_in,
-	int cmdFlags
+    const void *context,
+    const char *cmd,
+    const char *args_in,
+    int cmdFlags
 ) {
-	if (!pIRsend) {
-		ADDLOG_ERROR(LOG_FEATURE_IR,
-			(char *)"IRReplayLast: IR sender is not running");
-		return CMD_RES_ERROR;
-	}
+    if (!pIRsend) {
+        ADDLOG_ERROR(
+            LOG_FEATURE_IR,
+            (char *)"IRReplayLast: IR sender is not running"
+        );
+        return CMD_RES_ERROR;
+    }
 
-	if (!gLastRaw || gLastRawLen == 0) {
-		ADDLOG_ERROR(LOG_FEATURE_IR,
-			(char *)"IRReplayLast: no captured IR data");
-		return CMD_RES_ERROR;
-	}
-	
-	pIRsend->sendRaw(gLastRaw, gLastRawLen, 38);
+    if (!gLastRaw || gLastRawLen == 0) {
+        ADDLOG_ERROR(
+            LOG_FEATURE_IR,
+            (char *)"IRReplayLast: no captured IR data"
+        );
+        return CMD_RES_ERROR;
+    }
 
-	ADDLOG_INFO(LOG_FEATURE_IR,
-		(char *)"IRReplayLast queued %d raw timings",
-		(int)gLastRawLen);
+    const uint16_t maxTimings = (SEND_MAXBITS * 2) - 1;
 
-	return CMD_RES_OK;
+    if (gLastRawLen > maxTimings) {
+        ADDLOG_ERROR(
+            LOG_FEATURE_IR,
+            (char *)"IRReplayLast: RAW too long %d, maximum %d",
+            (int)gLastRawLen,
+            (int)maxTimings
+        );
+        return CMD_RES_BAD_ARGUMENT;
+    }
+
+    // Không cho nhấn thêm khi tín hiệu trước vẫn đang phát.
+    if (pIRsend->timecount != 0 || pIRsend->currentsendtime != 0) {
+        ADDLOG_ERROR(
+            LOG_FEATURE_IR,
+            (char *)"IRReplayLast: IR sender is busy"
+        );
+        return CMD_RES_ERROR;
+    }
+
+    // Bảo đảm hàng đợi sạch trước khi đưa RAW mới vào.
+    pIRsend->resetsendqueue();
+
+    pIRsend->sendRaw(gLastRaw, gLastRawLen, 38);
+
+    if (pIRsend->overflows) {
+        ADDLOG_ERROR(
+            LOG_FEATURE_IR,
+            (char *)"IRReplayLast: send queue overflow"
+        );
+        pIRsend->resetsendqueue();
+        return CMD_RES_ERROR;
+    }
+
+    ADDLOG_INFO(
+        LOG_FEATURE_IR,
+        (char *)"IRReplayLast queued %d raw timings at 38kHz",
+        (int)gLastRawLen
+    );
+
+    return CMD_RES_OK;
 }
 extern "C" commandResult_t IR_Send_Cmd(const void *context, const char *cmd, const char *args_in, int cmdFlags) {
 	if (!args_in) return CMD_RES_NOT_ENOUGH_ARGUMENTS;
