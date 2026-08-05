@@ -1086,31 +1086,55 @@ extern "C" void DRV_IR_RunFrame() {
                 ADDLOG_INFO(LOG_FEATURE_IR, "Received Unknown IR ");
             }
 
-            // Save a copy before resume() clears the receiver buffer.
-            if (gLastRaw) {
-                delete[] gLastRaw;
-                gLastRaw = NULL;
-            }
+ADDLOG_INFO(
+    LOG_FEATURE_IR,
+    (char *)"IR RX diag: rawlen=%d overflow=%d type=%d bits=%d",
+    (int)results.rawlen,
+    results.overflow ? 1 : 0,
+    (int)results.decode_type,
+    (int)results.bits
+);
 
-            gLastRawLen = getCorrectedRawLength(&results);
-            gLastRaw = resultToRawArray(&results);
+// Buffer thu đã đầy: bỏ khung lỗi, không chuyển thành RAW.
+if (results.overflow) {
+    ADDLOG_INFO(
+        LOG_FEATURE_IR,
+        (char *)"IR RX OVERFLOW: rawlen=%d - discarded",
+        (int)results.rawlen
+    );
 
-            if (!gLastRaw || gLastRawLen == 0) {
-                gLastRawLen = 0;
-                ADDLOG_ERROR(
-                    LOG_FEATURE_IR,
-                    (char *)"IR capture conversion failed"
-                );
-            } else {
-                ADDLOG_INFO(
-                    LOG_FEATURE_IR,
-                    (char *)"Captured corrected raw IR: %d timings",
-                    (int)gLastRawLen
-                );
-            }
+    ourReceiver->resume();
+    return;
+}
 
-            // Required after every successful decode().
-            ourReceiver->resume();
+// Xóa RAW cũ.
+if (gLastRaw) {
+    delete[] gLastRaw;
+    gLastRaw = NULL;
+    gLastRawLen = 0;
+}
+
+// Chỉ chuyển đổi khung hợp lệ.
+gLastRawLen = getCorrectedRawLength(&results);
+gLastRaw = resultToRawArray(&results);
+
+if (!gLastRaw || gLastRawLen == 0) {
+    gLastRawLen = 0;
+
+    ADDLOG_INFO(
+        LOG_FEATURE_IR,
+        (char *)"IR capture conversion failed"
+    );
+}
+else {
+    ADDLOG_INFO(
+        LOG_FEATURE_IR,
+        (char *)"Captured corrected raw IR: %d timings",
+        (int)gLastRawLen
+    );
+}
+
+ourReceiver->resume();
         }
     }
 }
