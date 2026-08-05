@@ -283,6 +283,7 @@ IRrecv *ourReceiver = NULL;
 
 static uint16_t *gLastRaw = NULL;
 static uint16_t gLastRawLen = 0;
+static bool gIRTxWasBusy = false;
 
 // this is our ISR.
 // it is called every 50us, so we need to work on making it as efficient as possible.
@@ -932,16 +933,45 @@ extern "C" void DRV_IR_RunFrame() {
 		//ADDLOG_INFO(LOG_FEATURE_IR, (char *)"IR counter: %u", ir_counter);
 	}
 	if (pIRsend) {
-		if (pIRsend->overflows) {
-			ADDLOG_DEBUG(LOG_FEATURE_IR, (char *)"##### IR send overflows %d", (int)pIRsend->overflows);
-			pIRsend->resetsendqueue();
-		}
-		else {
-			//ADDLOG_INFO(LOG_FEATURE_IR, (char *)"IR send count %d remains %d currentus %d", (int)pIRsend->timecounttotal, (int)pIRsend->timecount, (int)pIRsend->currentsendtime);
-		}
-	}
+    if (pIRsend->overflows) {
+        ADDLOG_DEBUG(
+            LOG_FEATURE_IR,
+            (char *)"##### IR send overflows %d",
+            (int)pIRsend->overflows
+        );
 
+        pIRsend->resetsendqueue();
+        gIRTxWasBusy = false;
 
+        if (ourReceiver) {
+            ourReceiver->resume();
+            ADDLOG_INFO(
+                LOG_FEATURE_IR,
+                (char *)"IR RX resumed after TX overflow"
+            );
+        }
+    }
+    else {
+        const bool txBusy =
+            (pIRsend->timecount != 0) ||
+            (pIRsend->currentsendtime != 0);
+
+        if (txBusy) {
+            gIRTxWasBusy = true;
+        }
+        else if (gIRTxWasBusy) {
+            gIRTxWasBusy = false;
+
+            if (ourReceiver) {
+                ourReceiver->resume();
+                ADDLOG_INFO(
+                    LOG_FEATURE_IR,
+                    (char *)"IR RX resumed after TX completed"
+                );
+            }
+        }
+    }
+}
 	if (ourReceiver) {
 		decode_results results;
 		if (ourReceiver->decode(&results)) {
