@@ -284,6 +284,58 @@ IRrecv *ourReceiver = NULL;
 static uint16_t *gLastRaw = NULL;
 static uint16_t gLastRawLen = 0;
 static bool gIRTxWasBusy = false;
+static bool gLoggedGoodRaw = false;
+static bool gLoggedBadRaw = false;
+
+static void IR_LogRawCompare(
+    const char *tag,
+    const uint16_t *raw,
+    uint16_t len
+) {
+    ADDLOG_INFO(
+        LOG_FEATURE_IR,
+        (char *)"IR RAW %s BEGIN len=%d",
+        tag,
+        (int)len
+    );
+
+    char line[128];
+
+    for (uint16_t i = 0; i < len; i += 10) {
+        int pos = snprintf(
+            line,
+            sizeof(line),
+            "%s %03d:",
+            tag,
+            (int)i
+        );
+
+        for (uint16_t j = i; j < len && j < i + 10; j++) {
+            if (pos >= (int)sizeof(line) - 8) {
+                break;
+            }
+
+            pos += snprintf(
+                line + pos,
+                sizeof(line) - pos,
+                " %u",
+                (unsigned int)raw[j]
+            );
+        }
+
+        ADDLOG_INFO(
+            LOG_FEATURE_IR,
+            (char *)"%s",
+            line
+        );
+    }
+
+    ADDLOG_INFO(
+        LOG_FEATURE_IR,
+        (char *)"IR RAW %s END",
+        tag
+    );
+}
 
 // this is our ISR.
 // it is called every 50us, so we need to work on making it as efficient as possible.
@@ -1132,6 +1184,20 @@ else {
         (char *)"Captured corrected raw IR: %d timings",
         (int)gLastRawLen
     );
+	    if (
+        results.decode_type == decode_type_t::COOLIX &&
+        !gLoggedGoodRaw
+    ) {
+        gLoggedGoodRaw = true;
+        IR_LogRawCompare("GOOD", gLastRaw, gLastRawLen);
+    }
+    else if (
+        results.decode_type == decode_type_t::UNKNOWN &&
+        !gLoggedBadRaw
+    ) {
+        gLoggedBadRaw = true;
+        IR_LogRawCompare("BAD", gLastRaw, gLastRawLen);
+    }
 }
 
 ourReceiver->resume();
