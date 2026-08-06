@@ -283,6 +283,7 @@ IRrecv *ourReceiver = NULL;
 static uint16_t *gLastRaw = NULL;
 static uint16_t gLastRawLen = 0;
 static bool gIRTxWasBusy = false;
+
 static bool IR_ValueInRange(
     const uint32_t value,
     const uint32_t minimum,
@@ -305,28 +306,47 @@ static uint32_t IR_Abs32(const int32_t value) {
 }
 
 /*
- * Gom dữ liệu từ một khung COOLIX.
+ * Convert one SPACE timing into signed evidence:
+ *   positive => transmitted bit was 1 (long SPACE)
+ *   negative => transmitted bit was 0 (short SPACE)
  *
- * Mỗi byte thật được theo sau bởi byte đảo.
- * Với mỗi bit:
- *   dataSpace > inverseSpace  => bit 1
- *   dataSpace < inverseSpace  => bit 0
+ * Measurements from this receiver remain clearly separated:
+ * short group is below about 600 us; long group is above about 1200 us.
+ * 900 us is therefore used only as the separating boundary.
+ */
+static int32_t IR_CoolixSpaceEvidence(const uint32_t space) {
+    if (!IR_ValueInRange(space, 80, 3200)) {
+        return 0;
+    }
+
+    if (space > 900) {
+        return (int32_t)(space - 900u) + 200;
+    }
+
+    return -((int32_t)(900u - space) + 200);
+}
+
+/*
+ * Add all usable evidence from one COOLIX frame.
  *
- * Không bắt buộc từng timing phải hoàn hảo.
- * Cặp timing quá méo sẽ được bỏ qua và lấy từ khung lặp khác.
+ * COOLIX sends each real byte followed by its inverted byte.
+ * For every logical bit we therefore have two observations:
+ *   data SPACE
+ *   inverted-data SPACE (its meaning is reversed)
+ *
+ * Unlike the old fallback, one damaged pair does not invalidate the frame.
  */
 static bool IR_AccumulateCoolixFrame(
     const decode_results *results,
     const uint16_t start,
-    int32_t bitSum[24],
-    int32_t bitBest[24],
-    uint8_t bitSamples[24]
+    int32_t bitScore[24],
+    uint8_t bitVotes[24]
 ) {
     if (!results || !results->rawbuf) {
         return false;
     }
 
-    // 2 header + 96 data timings + 1 footer.
+    // Header(2) + 48 * (mark+space) + footer(1) = 99 entries.
     if ((uint32_t)start + 98u >= results->rawlen) {
         return false;
     }
@@ -350,27 +370,37 @@ static bool IR_AccumulateCoolixFrame(
     }
 
     uint8_t saneMarks = 0;
+    uint8_t saneSpaces = 0;
 
-    // Kiểm tra tổng thể 48 MARK, không loại vì chỉ một MARK xấu.
     for (uint16_t rawBit = 0; rawBit < 48; rawBit++) {
         const uint16_t markIndex =
             start + 2 + rawBit * 2;
 
+        const uint16_t spaceIndex =
+            markIndex + 1;
+
         const uint32_t mark =
             IR_GetRawUsecs(results, markIndex);
+
+        const uint32_t space =
+            IR_GetRawUsecs(results, spaceIndex);
 
         if (IR_ValueInRange(mark, 80, 1600)) {
             saneMarks++;
         }
+
+        if (IR_CoolixSpaceEvidence(space) != 0) {
+            saneSpaces++;
+        }
     }
 
-    if (saneMarks < 36) {
+    // Reject noise while tolerating several damaged timings.
+    if (saneMarks < 34 || saneSpaces < 38) {
         return false;
     }
 
-    int32_t localDelta[24] = {0};
-    bool localValid[24] = {false};
-    uint8_t usableBits = 0;
+    int32_t localScore[24] = {0};
+    uint8_t localVotes[24] = {0};
 
     for (uint16_t group = 0; group < 3; group++) {
         for (uint16_t bit = 0; bit < 8; bit++) {
@@ -389,65 +419,97 @@ static bool IR_AccumulateCoolixFrame(
             const uint16_t inverseSpaceIndex =
                 start + 3 + inverseRawBit * 2;
 
-            const uint32_t dataSpace =
-                IR_GetRawUsecs(results, dataSpaceIndex);
+            const int32_t dataEvidence =
+                IR_CoolixSpaceEvidence(
+                    IR_GetRawUsecs(results, dataSpaceIndex)
+                );
 
-            const uint32_t inverseSpace =
-                IR_GetRawUsecs(results, inverseSpaceIndex);
+            const int32_t inverseEvidence =
+                IR_CoolixSpaceEvidence(
+                    IR_GetRawUsecs(results, inverseSpaceIndex)
+                );
 
-            // Chỉ bỏ đúng cặp timing quá vô lý.
-            if (!IR_ValueInRange(dataSpace, 80, 3200) ||
-                !IR_ValueInRange(inverseSpace, 80, 3200)) {
-                continue;
+            // Data observation: long means original bit 1.
+            if (dataEvidence != 0) {
+                localScore[outputBit] += dataEvidence;
+                localVotes[outputBit]++;
             }
 
-            const int32_t delta =
-                (int32_t)dataSpace -
-                (int32_t)inverseSpace;
-
-            // Hai timing gần bằng nhau thì cặp này không đủ tin cậy.
-            if (IR_Abs32(delta) < 120) {
-                continue;
+            // Inverted observation: reverse its meaning.
+            if (inverseEvidence != 0) {
+                localScore[outputBit] -= inverseEvidence;
+                localVotes[outputBit]++;
             }
+        }
+    }
 
-            localDelta[outputBit] = delta;
-            localValid[outputBit] = true;
+    uint8_t usableBits = 0;
+
+    for (uint16_t bit = 0; bit < 24; bit++) {
+        if (localVotes[bit] != 0 &&
+            IR_Abs32(localScore[bit]) >= 100) {
             usableBits++;
         }
     }
 
-    // Khung phải cung cấp được phần lớn số bit.
-    if (usableBits < 14) {
+    if (usableBits < 18) {
         return false;
     }
 
-    // Chỉ nhập dữ liệu sau khi xác nhận đây là một khung hợp lệ.
     for (uint16_t bit = 0; bit < 24; bit++) {
-        if (!localValid[bit]) {
+        if (localVotes[bit] == 0) {
             continue;
         }
 
-        const int32_t delta = localDelta[bit];
-
-        bitSum[bit] += delta;
-        bitSamples[bit]++;
-
-        if (IR_Abs32(delta) >
-            IR_Abs32(bitBest[bit])) {
-            bitBest[bit] = delta;
-        }
+        bitScore[bit] += localScore[bit];
+        bitVotes[bit] += localVotes[bit];
     }
 
     return true;
 }
 
+static void IR_AddCoolix48Hint(
+    const uint64_t raw48,
+    int32_t bitScore[24],
+    uint8_t bitVotes[24]
+) {
+    const uint8_t bytes[6] = {
+        (uint8_t)(raw48 >> 40),
+        (uint8_t)(raw48 >> 32),
+        (uint8_t)(raw48 >> 24),
+        (uint8_t)(raw48 >> 16),
+        (uint8_t)(raw48 >> 8),
+        (uint8_t)raw48
+    };
+
+    for (uint16_t group = 0; group < 3; group++) {
+        const uint8_t dataByte = bytes[group * 2];
+        const uint8_t inverseByte = bytes[group * 2 + 1];
+
+        for (uint16_t bit = 0; bit < 8; bit++) {
+            const uint8_t mask =
+                (uint8_t)(0x80u >> bit);
+
+            const uint16_t outputBit =
+                group * 8 + bit;
+
+            bitScore[outputBit] +=
+                (dataByte & mask) ? 250 : -250;
+
+            // Reverse the meaning of the transmitted inverted byte.
+            bitScore[outputBit] +=
+                (inverseByte & mask) ? -150 : 150;
+
+            bitVotes[outputBit] += 2;
+        }
+    }
+}
+
 /*
- * Khôi phục COOLIX từ UNKNOWN hoặc COOLIX48 nhận nhầm.
- *
- * - Quét mọi khung COOLIX trong rawbuf.
- * - Gom các khung lặp.
- * - Mỗi bit lấy tổng độ tin cậy của tất cả khung.
- * - Khi tổng bị triệt tiêu, dùng mẫu riêng có độ chênh lớn nhất.
+ * Recover normal 24-bit COOLIX from:
+ *   UNKNOWN
+ *   COOLIX48 caused by timing distortion
+ *   a raw buffer containing one, two, or several repeated frames
  */
 static bool IR_TryDecodeCoolixFallback(
     decode_results *results
@@ -463,51 +525,13 @@ static bool IR_TryDecodeCoolixFallback(
         return false;
     }
 
-    /*
-     * COOLIX48 đôi khi chính là COOLIX thường đã được thư viện
-     * đọc thành 48 bit. Nếu ba cặp byte đảo hoàn hảo thì đổi thẳng.
-     */
-    if (results->decode_type == decode_type_t::COOLIX48 &&
-        results->bits == 48) {
-
-        const uint64_t raw48 = results->value;
-
-        const uint8_t b0 = (uint8_t)(raw48 >> 40);
-        const uint8_t b1 = (uint8_t)(raw48 >> 32);
-        const uint8_t b2 = (uint8_t)(raw48 >> 24);
-        const uint8_t b3 = (uint8_t)(raw48 >> 16);
-        const uint8_t b4 = (uint8_t)(raw48 >> 8);
-        const uint8_t b5 = (uint8_t)raw48;
-
-        if (b1 == (uint8_t)(b0 ^ 0xFFu) &&
-            b3 == (uint8_t)(b2 ^ 0xFFu) &&
-            b5 == (uint8_t)(b4 ^ 0xFFu)) {
-
-            const uint32_t code =
-                ((uint32_t)b0 << 16) |
-                ((uint32_t)b2 << 8) |
-                (uint32_t)b4;
-
-            results->decode_type = decode_type_t::COOLIX;
-            results->bits = 24;
-            results->value = code;
-            results->address = 0;
-            results->command = 0;
-            results->repeat = false;
-
-            return true;
-        }
-    }
-
-    int32_t bitSum[24] = {0};
-    int32_t bitBest[24] = {0};
-    uint8_t bitSamples[24] = {0};
+    int32_t bitScore[24] = {0};
+    uint8_t bitVotes[24] = {0};
     uint8_t frameCount = 0;
 
     /*
-     * rawbuf[0] là khoảng nghỉ trước tín hiệu.
-     * MARK luôn ở vị trí lẻ: 1, 3, 5...
-     * Quét vị trí lẻ để không nhầm GAP + header thành header.
+     * rawbuf[0] is the leading gap. Real marks normally start at odd indexes.
+     * Scan every odd index so rawlen 200 and overflow buffers are both handled.
      */
     for (uint16_t start = 1;
          (uint32_t)start + 98u < results->rawlen;
@@ -516,11 +540,24 @@ static bool IR_TryDecodeCoolixFallback(
         if (IR_AccumulateCoolixFrame(
                 results,
                 start,
-                bitSum,
-                bitBest,
-                bitSamples)) {
+                bitScore,
+                bitVotes)) {
             frameCount++;
+            start += 96;
         }
+    }
+
+    /*
+     * A COOLIX48 decode is still useful as an additional weak hint.
+     * It is not trusted by itself; raw-frame evidence is still required.
+     */
+    if (results->decode_type == decode_type_t::COOLIX48 &&
+        results->bits == 48) {
+        IR_AddCoolix48Hint(
+            results->value,
+            bitScore,
+            bitVotes
+        );
     }
 
     if (frameCount == 0) {
@@ -530,35 +567,19 @@ static bool IR_TryDecodeCoolixFallback(
     uint32_t code = 0;
 
     for (uint16_t bit = 0; bit < 24; bit++) {
-        if (bitSamples[bit] == 0) {
-            return false;
-        }
-
-        int32_t decision = bitSum[bit];
-
-        /*
-         * Nếu hai khung có một khung méo ngược dấu làm tổng gần 0,
-         * lấy cặp timing riêng có độ tách lớn nhất.
-         */
-        if (IR_Abs32(decision) < 180) {
-            decision = bitBest[bit];
-        }
-
-        if (IR_Abs32(decision) < 120) {
+        if (bitVotes[bit] == 0 ||
+            IR_Abs32(bitScore[bit]) < 100) {
             return false;
         }
 
         code <<= 1;
 
-        if (decision > 0) {
+        if (bitScore[bit] > 0) {
             code |= 1u;
         }
     }
 
-    /*
-     * Toàn bộ mã Funiki đã thu thực tế đều thuộc họ COOLIX 0xBxxxxx.
-     * Điều kiện này ngăn nhiễu dài bị ép nhầm thành COOLIX.
-     */
+    // All confirmed codes from this Funiki remote begin with 0xB.
     if ((code & 0xF00000u) != 0xB00000u) {
         return false;
     }
