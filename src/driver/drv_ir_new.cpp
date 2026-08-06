@@ -1254,6 +1254,13 @@ extern "C" void DRV_IR_RunFrame() {
         (unsigned long)results.value
     );
 }
+			// Bỏ qua các mảnh xung ngắn phát sinh sau khung IR chính.
+// Không ghi log và không cho chúng ghi đè gLastRaw hợp lệ.
+if (results.decode_type == decode_type_t::UNKNOWN &&
+    results.rawlen < 99) {
+    ourReceiver->resume();
+    return;
+}
 			// TODO: find a better way?
 			String proto_name = typeToString(results.decode_type, results.repeat).c_str();
 
