@@ -362,42 +362,7 @@ static bool IR_AccumulateCoolixFrame(
         return false;
     }
 
-    const uint32_t footerMark =
-        IR_GetRawUsecs(results, start + 98);
 
-    if (!IR_ValueInRange(footerMark, 80, 1600)) {
-        return false;
-    }
-
-    uint8_t saneMarks = 0;
-    uint8_t saneSpaces = 0;
-
-    for (uint16_t rawBit = 0; rawBit < 48; rawBit++) {
-        const uint16_t markIndex =
-            start + 2 + rawBit * 2;
-
-        const uint16_t spaceIndex =
-            markIndex + 1;
-
-        const uint32_t mark =
-            IR_GetRawUsecs(results, markIndex);
-
-        const uint32_t space =
-            IR_GetRawUsecs(results, spaceIndex);
-
-        if (IR_ValueInRange(mark, 80, 1600)) {
-            saneMarks++;
-        }
-
-        if (IR_CoolixSpaceEvidence(space) != 0) {
-            saneSpaces++;
-        }
-    }
-
-    // Reject noise while tolerating several damaged timings.
-    if (saneMarks < 34 || saneSpaces < 38) {
-        return false;
-    }
 
     int32_t localScore[24] = {0};
     uint8_t localVotes[24] = {0};
@@ -443,18 +408,17 @@ static bool IR_AccumulateCoolixFrame(
         }
     }
 
-    uint8_t usableBits = 0;
+  uint8_t usableBits = 0;
 
-    for (uint16_t bit = 0; bit < 24; bit++) {
-        if (localVotes[bit] != 0 &&
-            IR_Abs32(localScore[bit]) >= 100) {
-            usableBits++;
-        }
+for (uint16_t bit = 0; bit < 24; bit++) {
+    if (localVotes[bit] != 0) {
+        usableBits++;
     }
+}
 
-    if (usableBits < 18) {
-        return false;
-    }
+if (usableBits < 12) {
+    return false;
+}
 
     for (uint16_t bit = 0; bit < 24; bit++) {
         if (localVotes[bit] == 0) {
@@ -533,9 +497,9 @@ static bool IR_TryDecodeCoolixFallback(
      * rawbuf[0] is the leading gap. Real marks normally start at odd indexes.
      * Scan every odd index so rawlen 200 and overflow buffers are both handled.
      */
-    for (uint16_t start = 1;
-         (uint32_t)start + 98u < results->rawlen;
-         start += 2) {
+   for (uint16_t start = 0;
+     (uint32_t)start + 98u < results->rawlen;
+     start++) {
 
         if (IR_AccumulateCoolixFrame(
                 results,
@@ -543,7 +507,7 @@ static bool IR_TryDecodeCoolixFallback(
                 bitScore,
                 bitVotes)) {
             frameCount++;
-            start += 96;
+            start += 97;
         }
     }
 
