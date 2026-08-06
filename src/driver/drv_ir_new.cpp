@@ -317,7 +317,6 @@ static bool IR_DecodeCoolixFallbackFrame(
         return false;
     }
 
-    // Cần đủ: 2 header + 96 data timings + 1 footer = 99 phần tử.
     if ((uint32_t)start + 98u >= results->rawlen) {
         return false;
     }
@@ -328,78 +327,95 @@ static bool IR_DecodeCoolixFallbackFrame(
     const uint32_t headerSpace =
         IR_GetRawUsecs(results, start + 1);
 
-    // Header thực tế đo được quanh 4.2 ms.
-    if (!IR_ValueInRange(headerMark, 3000, 5600) ||
-        !IR_ValueInRange(headerSpace, 3000, 5600)) {
+    if (!IR_ValueInRange(headerMark, 2500, 6500) ||
+        !IR_ValueInRange(headerSpace, 2500, 6500)) {
         return false;
     }
 
-    uint8_t bytes[6] = {0};
+    uint32_t decodedCode = 0;
 
-    for (uint16_t bit = 0; bit < 48; bit++) {
-        const uint16_t markIndex =
-            start + 2 + bit * 2;
+    /*
+     * Mỗi byte dữ liệu đi kèm byte đảo.
+     * Không đoán bit bằng ngưỡng tuyệt đối nữa.
+     * So trực tiếp SPACE của bit thật với SPACE của bit đảo:
+     * - SPACE thật dài hơn SPACE đảo => bit 1
+     * - SPACE thật ngắn hơn SPACE đảo => bit 0
+     */
+    for (uint16_t group = 0; group < 3; group++) {
+        for (uint16_t bit = 0; bit < 8; bit++) {
+            const uint16_t dataBitIndex =
+                group * 16 + bit;
 
-        const uint16_t spaceIndex =
-            markIndex + 1;
+            const uint16_t inverseBitIndex =
+                dataBitIndex + 8;
 
-        const uint32_t mark =
-            IR_GetRawUsecs(results, markIndex);
+            const uint16_t dataMarkIndex =
+                start + 2 + dataBitIndex * 2;
 
-        const uint32_t space =
-            IR_GetRawUsecs(results, spaceIndex);
+            const uint16_t dataSpaceIndex =
+                dataMarkIndex + 1;
 
-        /*
-         * MARK thực tế của cả mẫu GOOD và BAD nằm trong nhóm ngắn.
-         * Giới hạn rộng để chịu được xung co xuống khoảng 336 us.
-         */
-        if (!IR_ValueInRange(mark, 200, 900)) {
-            return false;
+            const uint16_t inverseMarkIndex =
+                start + 2 + inverseBitIndex * 2;
+
+            const uint16_t inverseSpaceIndex =
+                inverseMarkIndex + 1;
+
+            const uint32_t dataMark =
+                IR_GetRawUsecs(results, dataMarkIndex);
+
+            const uint32_t inverseMark =
+                IR_GetRawUsecs(results, inverseMarkIndex);
+
+            const uint32_t dataSpace =
+                IR_GetRawUsecs(results, dataSpaceIndex);
+
+            const uint32_t inverseSpace =
+                IR_GetRawUsecs(results, inverseSpaceIndex);
+
+            if (!IR_ValueInRange(dataMark, 100, 1300) ||
+                !IR_ValueInRange(inverseMark, 100, 1300)) {
+                return false;
+            }
+
+            const uint32_t highSpace =
+                dataSpace > inverseSpace
+                    ? dataSpace
+                    : inverseSpace;
+
+            const uint32_t lowSpace =
+                dataSpace < inverseSpace
+                    ? dataSpace
+                    : inverseSpace;
+
+            /*
+             * Một SPACE phải thuộc nhóm dài,
+             * một SPACE phải thuộc nhóm ngắn.
+             */
+            if (highSpace < 900 ||
+                lowSpace > 900 ||
+                highSpace - lowSpace < 250 ||
+                highSpace > 2600 ||
+                lowSpace < 100) {
+                return false;
+            }
+
+            const uint8_t decodedBit =
+                dataSpace > inverseSpace ? 1 : 0;
+
+            decodedCode =
+                (decodedCode << 1) | decodedBit;
         }
-
-        uint8_t decodedBit;
-
-        // SPACE bit 0: nhóm ngắn.
-        if (IR_ValueInRange(space, 200, 900)) {
-            decodedBit = 0;
-        }
-        // SPACE bit 1: nhóm dài.
-        else if (IR_ValueInRange(space, 950, 2200)) {
-            decodedBit = 1;
-        }
-        else {
-            return false;
-        }
-
-        const uint16_t byteIndex = bit / 8;
-
-        bytes[byteIndex] =
-            (uint8_t)((bytes[byteIndex] << 1) | decodedBit);
     }
 
     const uint32_t footerMark =
         IR_GetRawUsecs(results, start + 98);
 
-    if (!IR_ValueInRange(footerMark, 200, 900)) {
+    if (!IR_ValueInRange(footerMark, 100, 1300)) {
         return false;
     }
 
-    /*
-     * COOLIX gửi:
-     * byte0, ~byte0, byte1, ~byte1, byte2, ~byte2.
-     * Đây là kiểm tra bắt buộc để không biến nhiễu thành COOLIX.
-     */
-    if (bytes[1] != (uint8_t)(bytes[0] ^ 0xFFu) ||
-        bytes[3] != (uint8_t)(bytes[2] ^ 0xFFu) ||
-        bytes[5] != (uint8_t)(bytes[4] ^ 0xFFu)) {
-        return false;
-    }
-
-    *code =
-        ((uint32_t)bytes[0] << 16) |
-        ((uint32_t)bytes[2] << 8) |
-        (uint32_t)bytes[4];
-
+    *code = decodedCode;
     return true;
 }
 
@@ -415,12 +431,17 @@ static bool IR_DecodeCoolixFallbackFrame(
 static bool IR_TryDecodeCoolixFallback(
     decode_results *results
 ) {
-    if (!results ||
-        !results->rawbuf ||
-        results->decode_type != decode_type_t::UNKNOWN ||
-        results->rawlen < 99) {
-        return false;
-    }
+  if (!results ||
+    !results->rawbuf ||
+    results->rawlen < 99) {
+    return false;
+}
+
+// Chạy fallback cho cả UNKNOWN và COOLIX48 bị nhận sai.
+if (results->decode_type != decode_type_t::UNKNOWN &&
+    results->decode_type != decode_type_t::COOLIX48) {
+    return false;
+}
 
     static const uint8_t kMaxCandidates = 8;
 
