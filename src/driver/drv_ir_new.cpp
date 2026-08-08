@@ -1306,9 +1306,44 @@ void dump(decode_results *results) {
 ////////////////////////////////////////////////////
 // this polls the IR receive to see if there was any IR received
 extern "C" void DRV_IR_RunFrame() {
-	// Debug-only check to see if the timer interrupt is running
-	if (ir_counter) {
-		//ADDLOG_INFO(LOG_FEATURE_IR, (char *)"IR counter: %u", ir_counter);
+	// Diagnostic heartbeat only. This does NOT restart or modify IR RX/TX state.
+	// It distinguishes a dead hardware timer/ISR from a live timer with
+	// a stuck IRrecv/decoder. At 50 us per ISR, delta should keep increasing
+	// while the IR hardware timer is alive.
+	static uint32_t irDiagLastMs = 0;
+	static unsigned long irDiagLastCounter = 0;
+
+	const uint32_t irDiagNowMs = (uint32_t)g_timeMs;
+	if ((uint32_t)(irDiagNowMs - irDiagLastMs) >= 10000u) {
+		const unsigned long irDiagCounterNow = ir_counter;
+		const unsigned long irDiagCounterDelta =
+			irDiagCounterNow - irDiagLastCounter;
+
+		const unsigned int irDiagTxQueue =
+			pIRsend ? (unsigned int)pIRsend->timecount : 0u;
+		const int irDiagTxCurrent =
+			pIRsend ? (int)pIRsend->currentsendtime : 0;
+		const unsigned int irDiagTxOverflows =
+			pIRsend ? (unsigned int)pIRsend->overflows : 0u;
+
+		ADDLOG_INFO(
+			LOG_FEATURE_IR,
+			(char *)"IR DIAG ms=%u counter=%lu delta=%lu chan=%d rx=%d tx=%d txSeen=%d queue=%u current=%d overflows=%u rxtx=%u",
+			(unsigned int)irDiagNowMs,
+			irDiagCounterNow,
+			irDiagCounterDelta,
+			(int)ir_chan,
+			ourReceiver ? 1 : 0,
+			pIRsend ? 1 : 0,
+			gIRTxWasBusy ? 1 : 0,
+			irDiagTxQueue,
+			irDiagTxCurrent,
+			irDiagTxOverflows,
+			(unsigned int)gEnableIRSendWhilstReceive
+		);
+
+		irDiagLastMs = irDiagNowMs;
+		irDiagLastCounter = irDiagCounterNow;
 	}
 	if (pIRsend) {
     if (pIRsend->overflows) {
