@@ -542,6 +542,127 @@ static bool IR_TryDecodeCoolixFallback(
 
     return true;
 }
+
+/*
+ * Conservative fallback for standard NEC 32-bit remotes.
+ *
+ * Safety boundary:
+ *   - normal IRremoteESP8266 decoding gets first chance
+ *   - this fallback runs ONLY for UNKNOWN frames
+ *   - it runs ONLY for short frames: 67 <= rawlen < 99
+ *   - rawlen >= 99 is reserved for the existing COOLIX/Funiki path
+ *
+ * A complete standard NEC frame is validated as:
+ *   header + 32 data bits + footer
+ * with inverted address and command bytes. NEC repeat-only frames are ignored.
+ */
+static bool IR_TryDecodeNecFallback(
+    decode_results *results
+) {
+    if (!results ||
+        !results->rawbuf ||
+        results->decode_type != decode_type_t::UNKNOWN ||
+        results->rawlen < 67 ||
+        results->rawlen >= 99) {
+        return false;
+    }
+
+    // Header(2) + 32 * (MARK + SPACE) + footer MARK(1) = 67 timings.
+    // rawbuf[0] is normally the leading gap, so the header usually starts at 1.
+    // Scan the short buffer to tolerate a small extra captured timing.
+    for (uint16_t start = 0;
+         (uint32_t)start + 66u < results->rawlen;
+         start++) {
+
+        const uint32_t headerMark =
+            IR_GetRawUsecs(results, start);
+        const uint32_t headerSpace =
+            IR_GetRawUsecs(results, start + 1);
+
+        // NEC nominal header: 9000 us MARK + 4500 us SPACE.
+        if (!IR_ValueInRange(headerMark, 6500, 11000) ||
+            !IR_ValueInRange(headerSpace, 3000, 6000)) {
+            continue;
+        }
+
+        uint8_t bytes[4] = {0, 0, 0, 0};
+        uint32_t rawValue = 0;
+        bool valid = true;
+
+        for (uint16_t bit = 0; bit < 32; bit++) {
+            const uint16_t markIndex =
+                start + 2 + bit * 2;
+            const uint16_t spaceIndex =
+                start + 3 + bit * 2;
+
+            const uint32_t mark =
+                IR_GetRawUsecs(results, markIndex);
+            const uint32_t space =
+                IR_GetRawUsecs(results, spaceIndex);
+
+            // NEC data MARK nominal ~560 us.
+            if (!IR_ValueInRange(mark, 250, 1000)) {
+                valid = false;
+                break;
+            }
+
+            bool one = false;
+
+            // NEC 0 SPACE nominal ~560 us.
+            if (IR_ValueInRange(space, 250, 900)) {
+                one = false;
+            }
+            // NEC 1 SPACE nominal ~1690 us.
+            else if (IR_ValueInRange(space, 1050, 2600)) {
+                one = true;
+            }
+            else {
+                valid = false;
+                break;
+            }
+
+            // NEC transmits each byte LSB first.
+            if (one) {
+                bytes[bit / 8] |=
+                    (uint8_t)(1u << (bit % 8));
+            }
+
+            // IRremoteESP8266 stores the transmitted bit stream MSB-first in value.
+            // Example: address 0x00, command 0x06 -> 0x00FF609F.
+            rawValue =
+                (rawValue << 1) |
+                (one ? 1u : 0u);
+        }
+
+        if (!valid) {
+            continue;
+        }
+
+        const uint32_t footerMark =
+            IR_GetRawUsecs(results, start + 66);
+
+        if (!IR_ValueInRange(footerMark, 250, 1000)) {
+            continue;
+        }
+
+        // Standard NEC integrity checks. Extended NEC is deliberately not accepted.
+        if ((uint8_t)(bytes[0] ^ bytes[1]) != 0xFFu ||
+            (uint8_t)(bytes[2] ^ bytes[3]) != 0xFFu) {
+            continue;
+        }
+
+        results->decode_type = decode_type_t::NEC;
+        results->bits = 32;
+        results->value = rawValue;
+        results->address = bytes[0];
+        results->command = bytes[2];
+        results->repeat = false;
+
+        return true;
+    }
+
+    return false;
+}
 // this is our ISR.
 // it is called every 50us, so we need to work on making it as efficient as possible.
 extern "C" void DRV_IR_ISR(void* arg)
@@ -1239,6 +1360,15 @@ extern "C" void DRV_IR_RunFrame() {
         (unsigned long)results.value
     );
 }
+			else if (IR_TryDecodeNecFallback(&results)) {
+				ADDLOG_INFO(
+					LOG_FEATURE_IR,
+					(char *)"IR NEC fallback recovered: addr 0x%X cmd 0x%X raw 0x%08lX",
+					(unsigned int)results.address,
+					(unsigned int)results.command,
+					(unsigned long)results.value
+				);
+			}
 			// Bỏ qua các mảnh xung ngắn phát sinh sau khung IR chính.
 // Không ghi log và không cho chúng ghi đè gLastRaw hợp lệ.
 if (results.decode_type == decode_type_t::UNKNOWN &&
